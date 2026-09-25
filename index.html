@@ -125,6 +125,18 @@ button{cursor:pointer}
 .card[draggable="true"]{cursor:grab}
 .card.dragging{opacity:.4}
 .card .head{display:flex;align-items:center;gap:8px}
+.card{overflow:hidden}
+.thumb{margin:-14px -14px 0;aspect-ratio:4/3;background:var(--surface-2);display:block;position:relative;overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb.loading{background:linear-gradient(90deg,var(--surface-2),var(--line),var(--surface-2));background-size:200% 100%;animation:shimmer 1.2s linear infinite}
+@keyframes shimmer{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){.thumb.loading{animation:none}}
+.card .desc{margin:0;color:var(--muted);font-size:12.5px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.pv{display:flex;gap:10px;align-items:center;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:8px;min-height:64px}
+.pv img{width:64px;height:64px;object-fit:cover;border-radius:6px;flex:none;background:var(--line)}
+.pv div{min-width:0;font-size:12.5px;line-height:1.45}
+.pv b{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pv span{color:var(--muted)}
 .pbadge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--pc)}
 .pbadge i{width:22px;height:22px;border-radius:6px;background:var(--pc);color:var(--surface);display:grid;place-items:center;font-style:normal;font-family:var(--f-mono);font-size:10px;font-weight:500}
 .card .kind,.sample-tag{white-space:nowrap}
@@ -343,6 +355,67 @@ async function safe(fn, okMsg){
 }
 async function ensureCatsSaved(){ if (!S.catsSaved) await store.saveCats(); }
 
+/* ---------- previews & thumbnails ---------- */
+const THUMBS = new Map();          // itemId -> dataURL
+const PV = {busy:new Set()};
+const idb = {
+  db:null,
+  open(){ return new Promise(res=>{ try{ const r = indexedDB.open("shioribako",1); r.onupgradeneeded=()=>r.result.createObjectStore("thumbs"); r.onsuccess=()=>{ this.db=r.result; res(true); }; r.onerror=()=>res(false); }catch(e){ res(false); } }); },
+  tx(mode){ return this.db.transaction("thumbs",mode).objectStore("thumbs"); },
+  all(){ return new Promise(res=>{ if(!this.db) return res(); try{ const st=this.tx("readonly"); const rq=st.openCursor(); rq.onsuccess=()=>{ const c=rq.result; if(c){ THUMBS.set(c.key,c.value); c.continue(); } else res(); }; rq.onerror=()=>res(); }catch(e){ res(); } }); },
+  put(k,v){ try{ if(this.db) this.tx("readwrite").put(v,k); }catch(e){} },
+  del(k){ try{ if(this.db) this.tx("readwrite").delete(k); }catch(e){} }
+};
+async function fetchPreview(url){
+  try{
+    const r = await fetch("/api/preview?url="+encodeURIComponent(url));
+    if (!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+function makeThumb(imgUrl){
+  return new Promise(res=>{
+    if (!imgUrl) return res(null);
+    const im = new Image();
+    im.onload = ()=>{
+      try{
+        const W = 480, sc = Math.min(1, W/im.naturalWidth);
+        const c = document.createElement("canvas");
+        c.width = Math.max(1,Math.round(im.naturalWidth*sc)); c.height = Math.max(1,Math.round(im.naturalHeight*sc));
+        c.getContext("2d").drawImage(im,0,0,c.width,c.height);
+        res(c.toDataURL("image/jpeg",0.72));
+      }catch(e){ res(null); }
+    };
+    im.onerror = ()=>res(null);
+    im.src = "/api/img?url="+encodeURIComponent(imgUrl);
+  });
+}
+async function applyPreview(id, pv){
+  const it = S.items.find(i=>i.id===id); if (!it) return;
+  const patch = {pvAt:Date.now()};
+  if (pv){ patch.pvTitle = pv.title||""; patch.pvDesc = pv.description||""; if (pv.author && !it.pvAuthor) patch.pvAuthor = pv.author; }
+  if (pv && pv.image){ const t = await makeThumb(pv.image); if (t){ THUMBS.set(id,t); idb.put(id,t); } }
+  Object.assign(it, patch); store.persistLocal(); render();
+}
+async function loadPreviewFor(id){
+  if (PV.busy.has(id)) return; PV.busy.add(id); render();
+  const it = S.items.find(i=>i.id===id);
+  const pv = it ? await fetchPreview(it.url) : null;
+  await applyPreview(id, pv);
+  PV.busy.delete(id); render();
+}
+let backfillRunning = false;
+async function backfill(){
+  if (backfillRunning) return; backfillRunning = true;
+  const DAY = 86400e3;
+  for (const it of S.items.slice()){
+    if (THUMBS.has(it.id)) continue;
+    if (it.pvAt && Date.now()-it.pvAt < DAY) continue;
+    await loadPreviewFor(it.id);
+  }
+  backfillRunning = false;
+}
+
 /* ---------- derived ---------- */
 function showingSamples(){ return false; }
 function allItems(){
@@ -430,19 +503,24 @@ function card(it){
   const P = PLAT[it.platform] || PLAT.other;
   const c = catById(it.categoryId);
   const href = safeUrl(it.url);
+  const th = THUMBS.get(it.id);
+  const shownTitle = it.title || it.pvTitle;
   const node = el("article",{class:"card",style:`--pc:var(${P.var})`, draggable: it.sample ? null : "true"},
+    th ? (href ? el("a",{class:"thumb",href,target:"_blank",rel:"noopener noreferrer","aria-label":"投稿を開く"},el("img",{src:th,alt:"",loading:"lazy"})) : el("div",{class:"thumb"},el("img",{src:th,alt:""})))
+       : PV.busy.has(it.id) ? el("div",{class:"thumb loading","aria-hidden":"true"}) : null,
     el("div",{class:"head"},
       el("span",{class:"pbadge"},el("i",{text:P.mark}),P.name),
       it.kind ? el("span",{class:"kind",text:it.kind}) : null,
       it.sample ? el("span",{class:"sample-tag",text:"サンプル"}) : null,
       el("span",{class:"date",text:fmtDate(it.createdAt)})),
-    el("h3",{class:"title",text: it.title || (it.author ? it.author+" の"+(it.kind||"投稿") : "タイトルなし")}),
-    it.author && it.title ? el("div",{class:"who",text:it.author}) : null,
+    el("h3",{class:"title",text: shownTitle || (it.author ? it.author+" の"+(it.kind||"投稿") : "タイトルなし")}),
+    (it.author||it.pvAuthor) && shownTitle ? el("div",{class:"who",text:it.author||it.pvAuthor}) : null,
+    it.title && it.pvTitle && it.pvTitle!==it.title ? el("p",{class:"desc",text:it.pvTitle}) : (!it.title && it.pvDesc ? el("p",{class:"desc",text:it.pvDesc}) : null),
     it.note ? el("p",{class:"memo",text:it.note}) : null,
     el("div",{class:"url",text:it.url,title:it.url}),
     S.confirmId===it.id ? el("div",{class:"confirm"},el("span",{text:"削除しますか？"}),
         el("button",{class:"n",type:"button",onclick:()=>{S.confirmId=null;render();}},"やめる"),
-        el("button",{class:"y",type:"button",onclick:()=>{S.confirmId=null; safe(()=>store.deleteItem(it.id),"削除しました");}},"削除")) :
+        el("button",{class:"y",type:"button",onclick:()=>{S.confirmId=null; THUMBS.delete(it.id); idb.del(it.id); safe(()=>store.deleteItem(it.id),"削除しました");}},"削除")) :
     el("div",{class:"foot"},
       el("span",{class:"ctag"},el("span",{class:"sw",style:`background:${c?c.color:"var(--faint)"}`}),el("span",{text:c?c.name:"未分類"})),
       it.sample ? null : el("button",{class:"icon",type:"button",onclick:()=>openItemModal(it)},"編集"),
@@ -488,11 +566,31 @@ function openItemModal(existing, prefillUrl){
     det.replaceChildren(el("span",{class:"pbadge",style:`--pc:var(${P.var})`},el("i",{text:P.mark}),P.name), d.kind?el("span",{text:d.kind}):null, d.author?el("span",{style:"font-family:var(--f-mono)",text:d.author}):null,
       d.platform==="other"?el("span",{text:"（対応外のサイトも保存できます）"}):null);
   };
-  urlIn.addEventListener("input", upd); upd();
+  const pvBox = el("div",{hidden:true});
+  let pvData = null, pvFor = "", pvTimer = 0, titleTouched = isEdit && !!existing.title;
+  titleIn.addEventListener("input", ()=>{ titleTouched = true; });
+  const runPreview = () => {
+    const u = safeUrl(urlIn.value.trim());
+    if (!u || u === pvFor) return;
+    pvFor = u; pvData = null;
+    pvBox.hidden = false; pvBox.replaceChildren(el("div",{class:"pv"},el("span",{text:"投稿の情報を読み込み中…"})));
+    fetchPreview(u).then(pv=>{
+      if (pvFor !== u) return;
+      pvData = pv;
+      if (!pv){ pvBox.replaceChildren(el("div",{class:"pv"},el("span",{text:"画像やタイトルは取得できませんでした。このまま保存できます。"}))); return; }
+      pvBox.replaceChildren(el("div",{class:"pv"},
+        pv.image ? el("img",{src:"/api/img?url="+encodeURIComponent(pv.image),alt:""}) : null,
+        el("div",null,el("b",{text:pv.title||"（タイトルなし）"}), pv.description ? el("span",{text:pv.description.slice(0,80)}) : null)));
+      if (!titleTouched && !titleIn.value.trim() && pv.title) titleIn.value = pv.title.slice(0,120);
+    });
+  };
+  urlIn.addEventListener("input", ()=>{ upd(); clearTimeout(pvTimer); pvTimer = setTimeout(runPreview, 450); }); upd();
+  if (!isEdit && urlIn.value) setTimeout(runPreview, 0);
 
   const form = el("form",{class:"modal",novalidate:true},
     el("h3",{text:isEdit?"ブックマークを編集":"ブックマークを保存"}),
     el("div",{class:"field"},el("label",{for:"f-url",text:"投稿のURL"}),urlIn,det),
+    pvBox,
     el("div",{class:"field"},el("label",{for:"f-title",text:"タイトル"}),titleIn),
     el("div",{class:"field"},el("label",{for:"f-cat",text:"カテゴリ"}),catSel),
     newCatWrap,
@@ -517,8 +615,15 @@ function openItemModal(existing, prefillUrl){
         S.cats.push(c); await store.saveCats(); catId = c.id;
       } else await ensureCatsSaved();
       const body = {url, title:titleIn.value.trim(), note:noteIn.value.trim(), categoryId:catId};
-      if (isEdit) await store.updateItem(existing.id, body);
-      else await store.addItem({id:"b_"+uid(), ...body, createdAt:Date.now()});
+      if (isEdit){
+        const urlChanged = existing.url !== url;
+        await store.updateItem(existing.id, body);
+        if (urlChanged){ THUMBS.delete(existing.id); idb.del(existing.id); if (pvData && pvFor===url) applyPreview(existing.id, pvData); else loadPreviewFor(existing.id); }
+      } else {
+        const nid = "b_"+uid();
+        await store.addItem({id:nid, ...body, createdAt:Date.now()});
+        if (pvData && pvFor===url) applyPreview(nid, pvData); else loadPreviewFor(nid);
+      }
       closeModal();
       toast(isEdit ? "更新しました" : "保存しました");
     });
@@ -668,6 +773,7 @@ $("#catEditBtn").addEventListener("click", ()=>{ const c = catById(S.filterCat);
 render();
 store.init();
 incoming();
+idb.open().then(()=>idb.all()).then(()=>{ render(); backfill(); });
 })();
 </script>
 </body>
