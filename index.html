@@ -387,7 +387,7 @@ function makeThumb(imgUrl){
       }catch(e){ res(null); }
     };
     im.onerror = ()=>res(null);
-    im.src = "/api/img?url="+encodeURIComponent(imgUrl);
+    im.src = "/api/preview?img="+encodeURIComponent(imgUrl);
   });
 }
 async function applyPreview(id, pv){
@@ -579,7 +579,7 @@ function openItemModal(existing, prefillUrl){
       pvData = pv;
       if (!pv){ pvBox.replaceChildren(el("div",{class:"pv"},el("span",{text:"画像やタイトルは取得できませんでした。このまま保存できます。"}))); return; }
       pvBox.replaceChildren(el("div",{class:"pv"},
-        pv.image ? el("img",{src:"/api/img?url="+encodeURIComponent(pv.image),alt:""}) : null,
+        pv.image ? el("img",{src:"/api/preview?img="+encodeURIComponent(pv.image),alt:""}) : null,
         el("div",null,el("b",{text:pv.title||"（タイトルなし）"}), pv.description ? el("span",{text:pv.description.slice(0,80)}) : null)));
       if (!titleTouched && !titleIn.value.trim() && pv.title) titleIn.value = pv.title.slice(0,120);
     });
