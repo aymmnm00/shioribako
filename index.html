@@ -7,6 +7,9 @@
 <link rel="icon" type="image/png" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-title" content="しおりばこ">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <title>しおりばこ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -99,6 +102,7 @@ button{cursor:pointer}
 .addcat{margin-top:6px;justify-content:flex-start}
 .backup{display:flex;flex-direction:column;align-items:flex-start;margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
 .backup .btn{font-size:12px;padding:6px 8px}
+.sync{margin:10px 8px 0;font-size:12px;color:var(--muted);min-height:1em}
 .side .note{font-size:12px;color:var(--faint);margin:10px 8px 0;line-height:1.5}
 
 /* main */
@@ -126,7 +130,7 @@ button{cursor:pointer}
 .card.dragging{opacity:.4}
 .card .head{display:flex;align-items:center;gap:8px}
 .card{overflow:hidden}
-.thumb{margin:-14px -14px 0;aspect-ratio:4/3;background:var(--surface-2);display:block;position:relative;overflow:hidden}
+.thumb{margin:-14px -14px 0;aspect-ratio:16/10;background:var(--surface-2);display:block;position:relative;overflow:hidden}
 .thumb img{width:100%;height:100%;object-fit:cover;display:block}
 .thumb.loading{background:linear-gradient(90deg,var(--surface-2),var(--line),var(--surface-2));background-size:200% 100%;animation:shimmer 1.2s linear infinite}
 @keyframes shimmer{to{background-position:-200% 0}}
@@ -192,14 +196,26 @@ a.open:hover{background:var(--accent-soft)}
   .side{position:static}
   body{overflow-x:hidden}
   .side h2,.side .note{display:none}
+  .sync{margin:0}
   .backup{flex-direction:row;flex-wrap:wrap;margin-top:0;border-top:0;padding-top:0}
-  .cats{flex-direction:row;overflow-x:auto;padding-bottom:4px;gap:6px}
-  .cat{flex:none;border-color:var(--line);background:var(--surface)}
+  .cats{flex-direction:row;flex-wrap:wrap;gap:6px}
+  .cat{flex:none;max-width:100%;padding:6px 12px;border-color:var(--line);background:var(--surface);border-radius:999px;gap:8px}
+  .cat.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .cat.on .ct{color:inherit;opacity:.7}
+  .addcat{align-self:flex-start;padding:6px 4px}
   .cat .ed{display:none}
   .addcat{margin-top:0}
   .brand small{display:none}
   .quick-lbl{display:none}
   .quick{padding-left:10px}
+}
+@media (max-width:760px){
+  .card.has-thumb{display:grid;grid-template-columns:92px minmax(0,1fr);column-gap:12px;row-gap:6px;align-content:start}
+  .card.has-thumb > *{grid-column:2}
+  .card.has-thumb > .thumb{grid-column:1;grid-row:1 / span 4;margin:0;width:92px;height:92px;aspect-ratio:auto;border-radius:8px;align-self:start}
+  .card.has-thumb > .foot,.card.has-thumb > .confirm{grid-column:1 / -1}
+  .card.has-thumb .title{font-size:14px}
+  .card.has-thumb .url{display:none}
 }
 @media (prefers-reduced-motion:no-preference){
   .card{transition:transform .12s ease,box-shadow .12s ease}
@@ -226,6 +242,7 @@ a.open:hover{background:var(--accent-soft)}
     <ul class="cats" id="cats"></ul>
     <button class="btn ghost addcat" id="addCatBtn" type="button">＋ 新しいカテゴリ</button>
     <p class="note">カードをカテゴリにドラッグすると移動できます。</p>
+    <p class="sync" id="syncState" aria-live="polite"></p>
     <div class="backup">
       <button class="btn ghost" id="exportBtn" type="button">バックアップを書き出す</button>
       <button class="btn ghost" id="importBtn" type="button">バックアップから読み込む</button>
@@ -315,42 +332,117 @@ const S = {
 try{ const v = localStorage.getItem("shiori_view"); if (v){ const o = JSON.parse(v); S.filterPlat = o.p||"all"; } }catch(e){}
 
 /* ---------- storage ---------- */
-const store = {
-  libRef:null, itemsRef:null,
-  async init(){
-    // fallback: this browser only
-    S.backend = "local";
-    try{
-      const raw = localStorage.getItem("shiori_data");
-      if (raw){ const d = JSON.parse(raw); if (Array.isArray(d.cats)){ S.cats = d.cats; S.catsSaved = true; } if (Array.isArray(d.items)) S.items = d.items; }
-    }catch(e){ S.backend = "memory"; }
-    S.loaded = true; render();
-  },
-  persistLocal(){ if (S.backend !== "local") return; try{ localStorage.setItem("shiori_data", JSON.stringify({cats:S.cats, items:S.items})); }catch(e){ toast("保存領域がいっぱいか、ブラウザが保存を止めています。"); } },
-  async saveCats(){
-    S.catsSaved = true;
-    if (S.backend === "db"){ await this.libRef.set({categories:S.cats, updatedAt:Date.now()}); }
-    else this.persistLocal();
-  },
-  async addItem(it){
-    if (S.backend === "db"){ const {id, ...body} = it; await this.itemsRef.doc(id).set(body); }
-    else { S.items.push(it); this.persistLocal(); render(); }
-  },
-  async updateItem(id, patch){
-    if (S.backend === "db"){ await this.itemsRef.doc(id).update(patch); }
-    else { const it = S.items.find(i=>i.id===id); if (it) Object.assign(it, patch); this.persistLocal(); render(); }
-  },
-  async deleteItem(id){
-    if (S.backend === "db"){ await this.itemsRef.doc(id).delete(); }
-    else { S.items = S.items.filter(i=>i.id!==id); this.persistLocal(); render(); }
-  }
+const LS = {
+  get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); return true; }catch(e){ return false; } },
+  del(k){ try{ localStorage.removeItem(k); }catch(e){} }
 };
+const store = {
+  pass: LS.get("shiori_pass") || "",
+  queue: Promise.resolve(),
+  sync: "idle",           // idle | ok | saving | offline | error
+  init(){
+    // show the cached copy right away, then load from the cloud
+    try{
+      const raw = LS.get("shiori_data");
+      if (raw){ const d = JSON.parse(raw); if (Array.isArray(d.cats)){ S.cats = d.cats; S.catsSaved = true; } if (Array.isArray(d.items)) S.items = d.items; }
+    }catch(e){}
+    S.backend = "cloud";
+    if (!this.pass){ S.loaded = true; render(); openLogin(); return; }
+    this.pull(true);
+  },
+  cache(){ LS.set("shiori_data", JSON.stringify({cats:S.cats, items:S.items})); },
+  persistLocal(){ this.cache(); },
+  adopt(doc){
+    S.cats = doc.cats; S.items = doc.items; S.catsSaved = true;
+    this.cache(); S.loaded = true; this.setSync("ok"); render();
+    if (typeof backfill === "function") backfill();
+  },
+  setSync(v){ this.sync = v; const e = $("#syncState"); if (e) e.textContent = {ok:"☁ 同期済み",saving:"☁ 保存中…",offline:"⚠ オフライン（あとで同期します）",error:"⚠ 同期できませんでした",idle:""}[v]||""; },
+  async call(method, body){
+    const r = await fetch("/api/preview?data=1", {method, headers:{"Content-Type":"application/json","x-shiori-pass":encodeURIComponent(this.pass)}, body: body ? JSON.stringify(body) : undefined, cache:"no-store"});
+    let j = null; try{ j = await r.json(); }catch(e){}
+    if (!r.ok){ const err = new Error((j && j.error) || ("http_"+r.status)); err.code = (j && j.error) || "http"; throw err; }
+    return j;
+  },
+  pending(){ try{ return JSON.parse(LS.get("shiori_pending")||"[]"); }catch(e){ return []; } },
+  async pull(first){
+    try{
+      const pend = this.pending();
+      if (pend.length){ const d = await this.call("POST", {ops:pend}); LS.del("shiori_pending"); if (!first){ this.adopt(d); return; } }
+      const doc = await this.call("GET");
+      // first time on this device: send up anything saved here before syncing existed
+      if (first && !LS.get("shiori_merged") && (S.items.length || (S.catsSaved && S.cats.length))){
+        const merged = await this.call("POST", {ops:[{op:"merge", cats:S.cats, items:S.items}]});
+        LS.set("shiori_merged","1"); this.adopt(merged); return;
+      }
+      if (doc.fresh && !doc.cats.length && !doc.items.length){
+        const seeded = await this.call("POST", {ops:[{op:"setCats", cats:S.cats}]});
+        LS.set("shiori_merged","1"); this.adopt(seeded); return;
+      }
+      LS.set("shiori_merged","1");
+      this.adopt(doc);
+    }catch(e){ this.fail(e); S.loaded = true; render(); }
+  },
+  fail(e){
+    if (e.code === "bad_password"){ this.pass = ""; LS.del("shiori_pass"); openLogin("合言葉が違います。もう一度入力してください。"); }
+    else if (e.code === "no_storage" || e.code === "no_password_set"){ this.setSync("error"); showSetupHelp(e.code); }
+    else this.setSync(e instanceof TypeError ? "offline" : "error");
+  },
+  send(ops){
+    this.setSync("saving");
+    const run = async () => {
+      try{ const doc = await this.call("POST", {ops}); this.adopt(doc); }
+      catch(e){
+        if (e.code !== "bad_password"){ const pend = this.pending(); LS.set("shiori_pending", JSON.stringify(pend.concat(ops).slice(-500))); }
+        this.fail(e); throw e;
+      }
+    };
+    const p = this.queue.then(run, run);
+    this.queue = p.catch(()=>{});
+    return p;
+  },
+  // optimistic local change first, then the cloud copy replaces it
+  async saveCats(){ S.catsSaved = true; this.cache(); render(); return this.send([{op:"setCats", cats:S.cats}]); },
+  async addItem(it){ S.items.push(it); this.cache(); render(); return this.send([{op:"upsertItem", item:it}]); },
+  async updateItem(id, patch){ const it = S.items.find(i=>i.id===id); if (it) Object.assign(it, patch); this.cache(); render(); return this.send([{op:"patchItem", id, patch}]); },
+  async deleteItem(id){ S.items = S.items.filter(i=>i.id!==id); this.cache(); render(); return this.send([{op:"deleteItem", id}]); }
+};
+function openLogin(msg){
+  const inp = el("input",{id:"pass",type:"password",autocomplete:"current-password",placeholder:"Vercelで決めた合言葉"});
+  const err = el("div",{class:"err",text:msg||""});
+  const form = el("form",{class:"modal",novalidate:true},
+    el("h3",{text:"合言葉を入力"}),
+    el("p",{class:"lead",text:"ブックマークはネット上に保存され、スマホ・パソコン・ホーム画面のアプリのどこから開いても同じ一覧が見られます。この端末で最初の1回だけ入力してください。"}),
+    el("div",{class:"field"},el("label",{for:"pass",text:"合言葉"}),inp),
+    err,
+    el("div",{class:"actions"},el("button",{class:"btn primary",type:"submit"},"はじめる")));
+  form.addEventListener("submit", async e=>{
+    e.preventDefault();
+    const v = inp.value.trim(); if (!v){ err.textContent = "合言葉を入力してください。"; return; }
+    const btn = form.querySelector("button"); btn.disabled = true; err.textContent = "";
+    store.pass = v;
+    try{ await store.call("GET"); LS.set("shiori_pass", v); closeModal(); await store.pull(true); if (PENDING_URL){ const u = PENDING_URL; PENDING_URL = ""; openItemModal(null, u); } }
+    catch(x){
+      store.pass = "";
+      err.textContent = x.code==="bad_password" ? "合言葉が違います。" :
+        x.code==="no_password_set" ? "Vercelに合言葉（SHIORI_PASSWORD）がまだ設定されていません。" :
+        x.code==="no_storage" ? "Vercelの保存場所（Storage）がまだつながっていません。" :
+        "つながりませんでした。通信状況を確認してもう一度お試しください。";
+    }
+    btn.disabled = false;
+  });
+  showModal(form, "#pass");
+}
+function showSetupHelp(code){
+  toast(code==="no_storage" ? "Vercelの保存場所（Storage）がまだつながっていません。" : "Vercelに合言葉（SHIORI_PASSWORD）が設定されていません。");
+}
 async function safe(fn, okMsg){
   try{ await fn(); if (okMsg) toast(okMsg); }
   catch(e){
     const c = e && e.code;
     if (c === "_skip") return;
-    toast("保存できませんでした。もう一度お試しください。");
+    toast(c==="bad_password" ? "合言葉を入れ直してください。" : "この端末には保存しました。ネットにつながったら同期します。");
   }
 }
 async function ensureCatsSaved(){ if (!S.catsSaved) await store.saveCats(); }
@@ -395,7 +487,7 @@ async function applyPreview(id, pv){
   const patch = {pvAt:Date.now()};
   if (pv){ patch.pvTitle = pv.title||""; patch.pvDesc = pv.description||""; if (pv.author && !it.pvAuthor) patch.pvAuthor = pv.author; }
   if (pv && pv.image){ const t = await makeThumb(pv.image); if (t){ THUMBS.set(id,t); idb.put(id,t); } }
-  Object.assign(it, patch); store.persistLocal(); render();
+  store.updateItem(id, patch).catch(()=>{});
 }
 async function loadPreviewFor(id){
   if (PV.busy.has(id)) return; PV.busy.add(id); render();
@@ -486,7 +578,7 @@ function render(){
     showingSamples() ? el("div",{class:"banner"},
       el("p",null,el("strong",{text:"表示中のカードはサンプルです。"})," 右上の「保存する」から最初のブックマークを追加すると、サンプルは消えます。"),
       el("button",{class:"btn primary",type:"button",onclick:()=>openItemModal()},"最初の1件を保存")) :
-    S.backend==="memory" ? el("div",{class:"banner"},el("p",{text:"このブラウザでは保存できないため、ページを閉じると消えます。プライベートブラウズを解除してください。"})) : null].filter(Boolean));
+    null].filter(Boolean));
 
   // grid
   if (!vis.length){
@@ -505,7 +597,7 @@ function card(it){
   const href = safeUrl(it.url);
   const th = THUMBS.get(it.id);
   const shownTitle = it.title || it.pvTitle;
-  const node = el("article",{class:"card",style:`--pc:var(${P.var})`, draggable: it.sample ? null : "true"},
+  const node = el("article",{class:"card"+((th||PV.busy.has(it.id))?" has-thumb":""),style:`--pc:var(${P.var})`, draggable: it.sample ? null : "true"},
     th ? (href ? el("a",{class:"thumb",href,target:"_blank",rel:"noopener noreferrer","aria-label":"投稿を開く"},el("img",{src:th,alt:"",loading:"lazy"})) : el("div",{class:"thumb"},el("img",{src:th,alt:""})))
        : PV.busy.has(it.id) ? el("div",{class:"thumb loading","aria-hidden":"true"}) : null,
     el("div",{class:"head"},
@@ -698,13 +790,14 @@ quick.addEventListener("submit", e=>{ e.preventDefault(); if (!tryQuick()) toast
 
 
 /* ---------- opened from the shortcut: ?url=... ---------- */
+let PENDING_URL = "";
 function incoming(){
   const p = new URLSearchParams(location.search);
   const raw = p.get("url") || p.get("text") || "";
   if (!raw) return;
   history.replaceState(null, "", location.pathname);
   const m = raw.match(/https?:\/\/\S+/);
-  if (m && detect(m[0])) openItemModal(null, m[0]);
+  if (m && detect(m[0])){ if (!store.pass){ PENDING_URL = m[0]; return; } openItemModal(null, m[0]); }
   else toast("URLを読み取れませんでした。貼り付け欄から追加してください。");
 }
 
@@ -722,16 +815,9 @@ function importBackup(file){
     try{
       const d = JSON.parse(r.result);
       if (!d || !Array.isArray(d.items) || !Array.isArray(d.cats)) throw 0;
-      for (const c of d.cats) if (c && c.id && c.name && !S.cats.some(x=>x.id===c.id)) S.cats.push({id:String(c.id),name:String(c.name).slice(0,30),color:String(c.color||COLORS[0])});
-      let added = 0;
-      for (const it of d.items){
-        const url = it && safeUrl(it.url);
-        if (!url || S.items.some(x=>x.url===url)) continue;
-        S.items.push({id:String(it.id||"b_"+uid()), url, title:String(it.title||"").slice(0,120), note:String(it.note||"").slice(0,1000), categoryId:it.categoryId||null, createdAt:Number(it.createdAt)||Date.now()});
-        added++;
-      }
-      S.catsSaved = true; store.persistLocal(); render();
-      toast(`${added} 件を読み込みました`);
+      const before = S.items.length;
+      const items = d.items.filter(it=>it && safeUrl(it.url)).map(it=>({...it, id:String(it.id||"b_"+uid())}));
+      store.send([{op:"merge", cats:d.cats, items}]).then(()=>toast(`${S.items.length-before} 件を読み込みました`), ()=>{});
     }catch(e){ toast("このファイルは読み込めません。しおりばこで書き出したバックアップを選んでください。"); }
   };
   r.readAsText(file);
@@ -762,7 +848,7 @@ function openHelp(){
       el("li",null,"SNSで投稿の ",el("b",{text:"共有"})," →「その他」や「…」を開き、「しおりばこに保存」を選びます。",
         el("span",{class:"hint",text:"初回だけ、リンクを開いてよいかの確認が出ます。"}))
     ),
-    el("p",{class:"lead",text:"データはSafariの中に保存されます。ホーム画面のアイコンもSafariで開くので、ショートカットで保存したものと同じ一覧が見えます。ときどき「バックアップを書き出す」で控えを取っておくと安心です。"}),
+    el("p",{class:"lead",text:"保存したものはネット上にまとめて記録されるので、ショートカットで保存したものもホーム画面のアプリやパソコンにそのまま出てきます。"}),
     el("div",{class:"actions"},el("button",{class:"btn primary",type:"button",onclick:closeModal},"閉じる"))
   );
   showModal(m, "button");
@@ -774,6 +860,7 @@ render();
 store.init();
 incoming();
 idb.open().then(()=>idb.all()).then(()=>{ render(); backfill(); });
+document.addEventListener("visibilitychange", ()=>{ if (document.visibilityState==="visible" && store.pass) store.pull(false); });
 })();
 </script>
 </body>
